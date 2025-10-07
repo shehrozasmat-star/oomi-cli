@@ -1,0 +1,20 @@
+{
+  "name": "oomi-cli",
+  "version": "1.0.0",
+  "description": "CLI tool to create new WordPress projects from the official GitHub repo.",
+  "type": "module",
+  "bin": {
+    "oomi": "./index.js"
+  },
+  "preferGlobal": true,
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.7.4",
+    "commander": "^12.1.0",
+    "extract-zip": "^2.0.1"
+  }
+}
