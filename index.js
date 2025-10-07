@@ -12,7 +12,7 @@ import { validateLicense } from './utils/auth.js';
 const program = new Command();
 
 program
-  .name('oomi-wp')
+  .name('oomi')
   .description('Create WordPress projects from the official GitHub repository')
   .version('1.0.0');
 
