@@ -27,7 +27,6 @@ Thumbs.db
 .tmp/
 tmp/
 temp/
-.oomi-license
 *.zip
 *.tgz
 yarn.lock
