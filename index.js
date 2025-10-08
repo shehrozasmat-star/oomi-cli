@@ -84,34 +84,38 @@ program
     if (opts.theme) selectedThemeUrls.add(String(opts.theme).trim());
     const selectedPluginUrls = new Set([...(answers.selectedPlugins || [])]);
 
-    // Prompt for custom theme folder names per selected theme
+    // Prompt for theme display names and compute folder slugs per selected theme
     const themeSelections = [];
     if (selectedThemeUrls.size > 0) {
-      const usedNames = new Set();
+      const usedSlugs = new Set();
       for (const url of selectedThemeUrls) {
-        const defaultName = deriveRepoName(url);
-        let promptDefault = defaultName;
-        // Ensure default doesn't collide with already chosen names in this prompt loop
+        const defaultRepoName = deriveRepoName(url);
+        const baseTitle = toTitleFromSlug(defaultRepoName);
+        let promptDefault = baseTitle;
+        // Ensure default slug doesn't collide with already chosen slugs
         let suffix = 1;
-        while (usedNames.has(promptDefault)) {
-          promptDefault = `${defaultName}-${suffix++}`;
+        while (usedSlugs.has(slugify(promptDefault))) {
+          promptDefault = `${baseTitle} ${suffix++}`;
         }
         const { themeName } = await inquirer.prompt([{
           type: 'input',
           name: 'themeName',
-          message: `Set folder name for theme (${defaultName}):`,
+          message: `Set theme name (shown in WordPress) for (${defaultRepoName}):`,
           default: promptDefault,
           validate: (v) => {
             const name = String(v || '').trim();
-            if (!name) return 'Theme folder name is required';
+            if (!name) return 'Theme name is required';
             if (/[\\\/:*?"<>|]/.test(name)) return 'Name cannot contain path separators or special characters';
-            if (usedNames.has(name)) return 'Each theme must have a unique folder name';
+            const slug = slugify(name);
+            if (!slug) return 'Resulting folder name is empty; choose another name';
+            if (usedSlugs.has(slug)) return 'Each theme must have a unique name (slug would collide)';
             return true;
           }
         }]);
-        const finalName = String(themeName || '').trim();
-        usedNames.add(finalName);
-        themeSelections.push({ url, name: finalName });
+        const displayName = String(themeName || '').trim();
+        const dirSlug = slugify(displayName);
+        usedSlugs.add(dirSlug);
+        themeSelections.push({ url, name: dirSlug, displayName });
       }
     }
 
@@ -171,15 +175,27 @@ program
         await fsp.mkdir(themesDir, { recursive: true });
         const list = (themeSelections && themeSelections.length > 0)
           ? themeSelections
-          : Array.from(selectedThemeUrls).map(url => ({ url, name: deriveRepoName(url) }));
-        for (const { url: themeUrl, name: themeName } of list) {
+          : Array.from(selectedThemeUrls).map(url => {
+              const name = deriveRepoName(url);
+              return { url, name, displayName: toTitleFromSlug(name) };
+            });
+        for (const { url: themeUrl, name: themeName, displayName } of list) {
           const themeDest = path.join(themesDir, themeName);
           if (fs.existsSync(themeDest)) {
             console.warn(`Skipping theme (already exists): ${themeDest}`);
+            // Try to apply display name even if existing
+            try {
+              if (displayName) await applyThemeMeta(themeDest, displayName, themeName);
+            } catch (_) { /* ignore */ }
             continue;
           }
           console.log(`Cloning theme into ${path.relative(process.cwd(), themeDest)} ...`);
           execSync(`git clone --depth 1 "${themeUrl}" "${themeDest}"`, { stdio: 'inherit' });
+          try {
+            if (displayName) await applyThemeMeta(themeDest, displayName, themeName);
+          } catch (e) {
+            console.warn(`Warning: Failed to apply theme display name for ${themeName}: ${e?.message || e}`);
+          }
         }
       }
 
@@ -319,4 +335,100 @@ function generateWordPressGitignore(themeNames = [], pluginNames = []) {
   }
   lines.push('');
   return lines.join('\n') + '\n';
+}
+
+
+// Helper: convert a human-readable name to a safe folder slug (kebab-case)
+function slugify(str) {
+  return String(str)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '') // strip diacritics
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-+/g, '-');
+}
+
+// Helper: convert slug or repo name to Title Case for display
+function toTitleFromSlug(str) {
+  return String(str)
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean)
+    .map(s => s.charAt(0).toUpperCase() + s.slice(1))
+    .join(' ');
+}
+
+// After cloning a theme, ensure its style.css shows the chosen Theme Name and Text Domain
+async function applyThemeMeta(themeDir, displayName, slug) {
+  try {
+    const stylePath = path.join(themeDir, 'style.css');
+    if (!fs.existsSync(stylePath)) {
+      console.warn(`Warning: style.css not found in ${path.basename(themeDir)}; cannot set Theme Name.`);
+      return;
+    }
+    const raw = await fsp.readFile(stylePath, 'utf8');
+    const lines = raw.split(/\r?\n/);
+
+    let changed = false;
+    let nameReplaced = false;
+
+    // Replace Theme Name line within the first 200 lines
+    for (let i = 0; i < Math.min(lines.length, 200); i++) {
+      const m = lines[i].match(/^(\s*\*?\s*)Theme\s*Name\s*:\s*(.*)$/i);
+      if (m) {
+        lines[i] = `${m[1]}Theme Name: ${displayName}`;
+        nameReplaced = true;
+        changed = true;
+        break;
+      }
+      // Stop if header likely ended
+      if (/^\s*\*\/\s*$/.test(lines[i])) break;
+    }
+
+    // Replace or insert Text Domain to match slug
+    let domainReplaced = false;
+    if (slug) {
+      for (let i = 0; i < Math.min(lines.length, 200); i++) {
+        const m = lines[i].match(/^(\s*\*?\s*)Text\s*Domain\s*:\s*(.*)$/i);
+        if (m) {
+          lines[i] = `${m[1]}Text Domain: ${slug}`;
+          domainReplaced = true;
+          changed = true;
+          break;
+        }
+        if (/^\s*\*\/\s*$/.test(lines[i])) break;
+      }
+      if (!domainReplaced && nameReplaced) {
+        // Insert just after Theme Name line
+        const idx = lines.findIndex(l => /^\s*\*?\s*Theme\s*Name\s*:/i.test(l));
+        const prefixMatch = idx >= 0 ? lines[idx].match(/^(\s*\*?\s*)/) : null;
+        const prefix = prefixMatch ? prefixMatch[1] : '';
+        if (idx >= 0) {
+          lines.splice(idx + 1, 0, `${prefix}Text Domain: ${slug}`);
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) {
+      await fsp.writeFile(stylePath, lines.join('\n'), 'utf8');
+      return;
+    }
+
+    // If no header fields were found, prepend a minimal header
+    const header = [
+      '/*',
+      `Theme Name: ${displayName}`,
+      ...(slug ? [`Text Domain: ${slug}`] : []),
+      '*/',
+      ''
+    ].join('\n');
+    await fsp.writeFile(stylePath, header + raw, 'utf8');
+  } catch (e) {
+    console.warn(`Warning: Could not update theme metadata in ${path.basename(themeDir)}: ${e?.message || e}`);
+  }
 }
