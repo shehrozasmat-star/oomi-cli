@@ -28,7 +28,7 @@ program
       process.exit(1);
     }
 
-    // Gather interactive inputs
+    
     const AVAILABLE_THEMES = [
       { name: 'oomi-boilerplate-theme', url: 'https://github.com/shehrozasmat-star/oomi-boilerplate-theme' }
     ];
@@ -84,6 +84,37 @@ program
     if (opts.theme) selectedThemeUrls.add(String(opts.theme).trim());
     const selectedPluginUrls = new Set([...(answers.selectedPlugins || [])]);
 
+    // Prompt for custom theme folder names per selected theme
+    const themeSelections = [];
+    if (selectedThemeUrls.size > 0) {
+      const usedNames = new Set();
+      for (const url of selectedThemeUrls) {
+        const defaultName = deriveRepoName(url);
+        let promptDefault = defaultName;
+        // Ensure default doesn't collide with already chosen names in this prompt loop
+        let suffix = 1;
+        while (usedNames.has(promptDefault)) {
+          promptDefault = `${defaultName}-${suffix++}`;
+        }
+        const { themeName } = await inquirer.prompt([{
+          type: 'input',
+          name: 'themeName',
+          message: `Set folder name for theme (${defaultName}):`,
+          default: promptDefault,
+          validate: (v) => {
+            const name = String(v || '').trim();
+            if (!name) return 'Theme folder name is required';
+            if (/[\\\/:*?"<>|]/.test(name)) return 'Name cannot contain path separators or special characters';
+            if (usedNames.has(name)) return 'Each theme must have a unique folder name';
+            return true;
+          }
+        }]);
+        const finalName = String(themeName || '').trim();
+        usedNames.add(finalName);
+        themeSelections.push({ url, name: finalName });
+      }
+    }
+
     const projectDir = path.resolve(process.cwd(), projectName);
     if (fs.existsSync(projectDir)) {
       console.error(`Error: Folder already exists: ${projectDir}`);
@@ -135,11 +166,13 @@ program
       await copyDirContents(topDirPath, projectDir);
 
       // Clone selected themes
-      if (selectedThemeUrls.size > 0) {
+      if ((themeSelections && themeSelections.length > 0) || selectedThemeUrls.size > 0) {
         const themesDir = path.join(projectDir, 'wp-content', 'themes');
         await fsp.mkdir(themesDir, { recursive: true });
-        for (const themeUrl of selectedThemeUrls) {
-          const themeName = deriveRepoName(themeUrl);
+        const list = (themeSelections && themeSelections.length > 0)
+          ? themeSelections
+          : Array.from(selectedThemeUrls).map(url => ({ url, name: deriveRepoName(url) }));
+        for (const { url: themeUrl, name: themeName } of list) {
           const themeDest = path.join(themesDir, themeName);
           if (fs.existsSync(themeDest)) {
             console.warn(`Skipping theme (already exists): ${themeDest}`);
@@ -168,7 +201,9 @@ program
 
       // Create .gitignore if requested
       if (answers.includeGitignore) {
-        const selectedThemeNames = Array.from(selectedThemeUrls).map(deriveRepoName);
+        const selectedThemeNames = (themeSelections && themeSelections.length > 0)
+          ? themeSelections.map(t => t.name)
+          : Array.from(selectedThemeUrls).map(deriveRepoName);
         const selectedPluginNames = Array.from(selectedPluginUrls).map(deriveRepoName);
         const giContent = generateWordPressGitignore(selectedThemeNames, selectedPluginNames);
         await fsp.writeFile(path.join(projectDir, '.gitignore'), giContent, 'utf8');
