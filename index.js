@@ -7,6 +7,7 @@ import axios from 'axios';
 import extract from 'extract-zip';
 import { execSync } from 'child_process';
 import { Command } from 'commander';
+import inquirer from 'inquirer';
 import { validateLicense } from './utils/auth.js';
 
 const program = new Command();
@@ -18,7 +19,7 @@ program
 
 program
   .command('create-project')
-  .requiredOption('--name <projectName>', 'Project name')
+  .option('--name <projectName>', 'Project name (if omitted, you will be prompted)')
   .option('--theme <git_repo_url>', 'Optional theme git repository URL')
   .action(async (opts) => {
     const { valid, message } = validateLicense();
@@ -27,11 +28,61 @@ program
       process.exit(1);
     }
 
-    const projectName = String(opts.name || '').trim();
-    if (!projectName) {
-      console.error('Error: --name is required.');
-      process.exit(1);
-    }
+    // Gather interactive inputs
+    const AVAILABLE_THEMES = [
+      { name: 'oomi-boilerplate-theme', url: 'https://github.com/shehrozasmat-star/oomi-boilerplate-theme' }
+    ];
+    const AVAILABLE_PLUGINS = [
+      { name: 'oomi-sso', url: 'https://github.com/shehrozasmat-star/oomi-sso' },
+      { name: 'oomi-listing', url: 'https://github.com/shehrozasmat-star/oomi-listing' }
+    ];
+
+    let projectName = String(opts.name || '').trim();
+    const answers = await inquirer.prompt([
+      ...(projectName ? [] : [{
+        type: 'input',
+        name: 'projectName',
+        message: 'Enter project name:',
+        validate: (v) => {
+          const name = String(v || '').trim();
+          if (!name) return 'Project name is required';
+          if (/[\\/:*?"<>|]/.test(name)) return 'Project name cannot contain path separators or special characters';
+          return true;
+        }
+      }]),
+      {
+        type: 'confirm',
+        name: 'injectTheme',
+        message: 'Do you want to inject the theme?',
+        default: true
+      },
+      {
+        type: 'checkbox',
+        name: 'selectedThemes',
+        message: 'Select theme(s) to include (space to toggle, enter to confirm):',
+        when: (a) => a.injectTheme,
+        choices: AVAILABLE_THEMES.map(t => ({ name: t.name, value: t.url }))
+      },
+      {
+        type: 'checkbox',
+        name: 'selectedPlugins',
+        message: 'Select plugin(s) to include (space to toggle, enter to confirm):',
+        choices: AVAILABLE_PLUGINS.map(p => ({ name: p.name, value: p.url }))
+      },
+      {
+        type: 'confirm',
+        name: 'includeGitignore',
+        message: 'Do you want to include .gitignore in WordPress installation?',
+        default: true
+      }
+    ]);
+
+    if (!projectName) projectName = String(answers.projectName || '').trim();
+
+    // Preselect theme passed via --theme as well
+    const selectedThemeUrls = new Set([...(answers.selectedThemes || [])]);
+    if (opts.theme) selectedThemeUrls.add(String(opts.theme).trim());
+    const selectedPluginUrls = new Set([...(answers.selectedPlugins || [])]);
 
     const projectDir = path.resolve(process.cwd(), projectName);
     if (fs.existsSync(projectDir)) {
@@ -83,24 +134,49 @@ program
       console.log('Copying files into project folder ...');
       await copyDirContents(topDirPath, projectDir);
 
-      if (opts.theme) {
-        const themeUrl = String(opts.theme).trim();
+      // Clone selected themes
+      if (selectedThemeUrls.size > 0) {
         const themesDir = path.join(projectDir, 'wp-content', 'themes');
         await fsp.mkdir(themesDir, { recursive: true });
-        const themeName = deriveRepoName(themeUrl);
-        const themeDest = path.join(themesDir, themeName);
-        if (fs.existsSync(themeDest)) {
-          throw new Error(`Theme destination already exists: ${themeDest}`);
+        for (const themeUrl of selectedThemeUrls) {
+          const themeName = deriveRepoName(themeUrl);
+          const themeDest = path.join(themesDir, themeName);
+          if (fs.existsSync(themeDest)) {
+            console.warn(`Skipping theme (already exists): ${themeDest}`);
+            continue;
+          }
+          console.log(`Cloning theme into ${path.relative(process.cwd(), themeDest)} ...`);
+          execSync(`git clone --depth 1 "${themeUrl}" "${themeDest}"`, { stdio: 'inherit' });
         }
-        console.log(`Cloning theme into ${path.relative(process.cwd(), themeDest)} ...`);
-        execSync(`git clone --depth 1 "${themeUrl}" "${themeDest}"`, { stdio: 'inherit' });
+      }
+
+      // Clone selected plugins
+      if (selectedPluginUrls.size > 0) {
+        const pluginsDir = path.join(projectDir, 'wp-content', 'plugins');
+        await fsp.mkdir(pluginsDir, { recursive: true });
+        for (const pluginUrl of selectedPluginUrls) {
+          const pluginName = deriveRepoName(pluginUrl);
+          const pluginDest = path.join(pluginsDir, pluginName);
+          if (fs.existsSync(pluginDest)) {
+            console.warn(`Skipping plugin (already exists): ${pluginDest}`);
+            continue;
+          }
+          console.log(`Cloning plugin into ${path.relative(process.cwd(), pluginDest)} ...`);
+          execSync(`git clone --depth 1 "${pluginUrl}" "${pluginDest}"`, { stdio: 'inherit' });
+        }
+      }
+
+      // Create .gitignore if requested
+      if (answers.includeGitignore) {
+        const selectedThemeNames = Array.from(selectedThemeUrls).map(deriveRepoName);
+        const selectedPluginNames = Array.from(selectedPluginUrls).map(deriveRepoName);
+        const giContent = generateWordPressGitignore(selectedThemeNames, selectedPluginNames);
+        await fsp.writeFile(path.join(projectDir, '.gitignore'), giContent, 'utf8');
+        console.log('Created .gitignore tailored to selected themes/plugins.');
       }
 
       console.log('Success: WordPress project created.');
       console.log(`Location: ${projectDir}`);
-      if (opts.theme) {
-        console.log('Theme installed successfully.');
-      }
     } catch (err) {
       console.error(`Error: ${err?.message || String(err)}`);
       // Cleanup project directory on failure
@@ -176,4 +252,36 @@ function deriveRepoName(repoUrl) {
   const parts = name.split('/');
   const last = parts[parts.length - 1] || '';
   return last.replace(/\.git$/, '') || 'theme';
+}
+
+
+function generateWordPressGitignore(themeNames = [], pluginNames = []) {
+  const lines = [];
+  lines.push('# WordPress project: ignore everything except selected themes/plugins');
+  lines.push('/*');
+  lines.push('!.gitignore');
+  lines.push('!wp-content/');
+  lines.push('');
+  lines.push('# In wp-content, ignore all except themes and plugins');
+  lines.push('wp-content/*');
+  lines.push('!wp-content/themes/');
+  lines.push('!wp-content/plugins/');
+  lines.push('');
+  lines.push('# Ignore all themes except the selected ones');
+  lines.push('wp-content/themes/*');
+  for (const name of themeNames) {
+    const n = String(name).trim();
+    if (!n) continue;
+    lines.push(`!wp-content/themes/${n}/**`);
+  }
+  lines.push('');
+  lines.push('# Ignore all plugins except the selected ones');
+  lines.push('wp-content/plugins/*');
+  for (const name of pluginNames) {
+    const n = String(name).trim();
+    if (!n) continue;
+    lines.push(`!wp-content/plugins/${n}/**`);
+  }
+  lines.push('');
+  return lines.join('\n') + '\n';
 }
