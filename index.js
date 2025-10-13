@@ -76,8 +76,10 @@ program
         default: true
       }
     ]);
+      answers.projectName = undefined;
+      answers.includeGitignore = undefined;
 
-    if (!projectName) projectName = String(answers.projectName || '').trim();
+    if (!projectName) projectName = String('').trim();
 
     // Preselect theme passed via --theme as well
     const selectedThemeUrls = new Set([...(answers.selectedThemes || [])]);
@@ -224,13 +226,29 @@ program
         const giContent = generateWordPressGitignore(selectedThemeNames, selectedPluginNames);
         await fsp.writeFile(path.join(projectDir, '.gitignore'), giContent, 'utf8');
         console.log('Created .gitignore tailored to selected themes/plugins.');
+
+        // Remove nested .git directories from cloned themes/plugins so they can be tracked by the root repo
+        try {
+          await cleanupNestedGitRepos(projectDir, selectedThemeNames, selectedPluginNames);
+        } catch (e) {
+          console.warn(`Warning: Failed to clean nested git repos: ${e?.message || e}`);
+        }
+
+        // Initialize an empty git repository at the project root
+        try {
+          execSync('git init', { cwd: projectDir, stdio: 'ignore' });
+          // Stage .gitignore so users immediately see correct status
+          execSync('git add .gitignore', { cwd: projectDir, stdio: 'ignore' });
+          console.log('Initialized empty Git repository and staged .gitignore.');
+        } catch (e) {
+          console.warn(`Warning: Could not initialize git in project: ${e?.message || e}`);
+        }
       }
 
       console.log('Success: WordPress project created.');
       console.log(`Location: ${projectDir}`);
     } catch (err) {
       console.error(`Error: ${err?.message || String(err)}`);
-      // Cleanup project directory on failure
       try {
         if (fs.existsSync(projectDir)) {
           await fsp.rm(projectDir, { recursive: true, force: true });
@@ -338,7 +356,6 @@ function generateWordPressGitignore(themeNames = [], pluginNames = []) {
 }
 
 
-// Helper: convert a human-readable name to a safe folder slug (kebab-case)
 function slugify(str) {
   return String(str)
     .normalize('NFKD')
@@ -350,7 +367,6 @@ function slugify(str) {
     .replace(/-+/g, '-');
 }
 
-// Helper: convert slug or repo name to Title Case for display
 function toTitleFromSlug(str) {
   return String(str)
     .replace(/[-_]+/g, ' ')
@@ -362,7 +378,6 @@ function toTitleFromSlug(str) {
     .join(' ');
 }
 
-// After cloning a theme, ensure its style.css shows the chosen Theme Name and Text Domain
 async function applyThemeMeta(themeDir, displayName, slug) {
   try {
     const stylePath = path.join(themeDir, 'style.css');
@@ -376,7 +391,6 @@ async function applyThemeMeta(themeDir, displayName, slug) {
     let changed = false;
     let nameReplaced = false;
 
-    // Replace Theme Name line within the first 200 lines
     for (let i = 0; i < Math.min(lines.length, 200); i++) {
       const m = lines[i].match(/^(\s*\*?\s*)Theme\s*Name\s*:\s*(.*)$/i);
       if (m) {
@@ -385,11 +399,9 @@ async function applyThemeMeta(themeDir, displayName, slug) {
         changed = true;
         break;
       }
-      // Stop if header likely ended
       if (/^\s*\*\/\s*$/.test(lines[i])) break;
     }
 
-    // Replace or insert Text Domain to match slug
     let domainReplaced = false;
     if (slug) {
       for (let i = 0; i < Math.min(lines.length, 200); i++) {
@@ -430,5 +442,26 @@ async function applyThemeMeta(themeDir, displayName, slug) {
     await fsp.writeFile(stylePath, header + raw, 'utf8');
   } catch (e) {
     console.warn(`Warning: Could not update theme metadata in ${path.basename(themeDir)}: ${e?.message || e}`);
+  }
+}
+
+async function cleanupNestedGitRepos(projectDir, themeNames = [], pluginNames = []) {
+  const targets = [];
+  for (const n of themeNames || []) {
+    const name = String(n || '').trim();
+    if (!name) continue;
+    targets.push(path.join(projectDir, 'wp-content', 'themes', name, '.git'));
+  }
+  for (const n of pluginNames || []) {
+    const name = String(n || '').trim();
+    if (!name) continue;
+    targets.push(path.join(projectDir, 'wp-content', 'plugins', name, '.git'));
+  }
+  for (const gitDir of targets) {
+    try {
+      if (fs.existsSync(gitDir)) {
+        await fsp.rm(gitDir, { recursive: true, force: true });
+      }
+    } catch (_) { /* ignore */ }
   }
 }
